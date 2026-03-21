@@ -1,0 +1,57 @@
+{
+  "name": "chatgpt-sync-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "React + Electron desktop shell for OpenClaw with auto update support.",
+  "main": "src/electron/main.js",
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron.js",
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .",
+    "fix:electron": "node scripts/ensure-electron.js",
+    "start": "electron .",
+    "build:web": "vite build",
+    "build": "npm run build:web",
+    "pack": "npm run build:web && electron-builder --dir",
+    "dist": "npm run build:web && electron-builder",
+    "dist:update": "npm run build:web && electron-builder --publish always",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "electron": "^25.9.8",
+    "electron-updater": "^6.8.3",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron-builder": "^26.8.1",
+    "vite": "^4.5.3",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "ai.openclaw.desktop",
+    "productName": "OpenClaw Desktop",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "src/electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "assets",
+      "output": "release"
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}
