@@ -1,4 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import styles from './index.module.css'
+
+function cx(...values) {
+  return values.filter(Boolean).join(' ')
+}
 
 function resolveApi() {
   if (typeof window === 'undefined') return null
@@ -14,11 +19,7 @@ function resolveApi() {
     return {
       openExternal: desktopApp?.openExternal,
       onInstallProgress: desktopApp?.onInstallProgress || legacyApp?.onInstallProgress,
-      onAppUpdateState: desktopApp?.onAppUpdateState,
       getLauncherStatus: desktopApp?.getLauncherStatus || legacyApp?.getLauncherStatus,
-      getAppUpdateState: desktopApp?.getAppUpdateState,
-      checkAppUpdate: desktopApp?.checkAppUpdate,
-      quitAndInstallUpdate: desktopApp?.quitAndInstallUpdate,
       ensureDeps: desktopApp?.ensureDeps || legacyApp?.ensureDeps,
       setToken: desktopApp?.setToken || legacyApp?.setToken,
       startChatSession: desktopApp?.startChatSession || desktopApp?.startAndOpenChat || legacyApp?.startAndOpenChat
@@ -35,18 +36,20 @@ function envReady(status) {
 }
 function VersionCard({ title, required, installed, ok }) {
   return (
-    <div className={`version-card ${ok ? 'ok' : 'warn'}`}>
-      <div className="version-top">
-        <div className="version-title">{title}</div>
-        <div className={`version-state ${ok ? 'ok' : 'warn'}`}>{ok ? '已达标' : '需处理'}</div>
+    <div className={cx(styles.versionCard, ok ? styles.versionCardOk : styles.versionCardWarn)}>
+      <div className={styles.versionTop}>
+        <div className={styles.versionTitle}>{title}</div>
+        <div className={cx(styles.versionState, ok ? styles.versionStateOk : styles.versionStateWarn)}>{ok ? '已达标' : '需处理'}</div>
       </div>
-      <div className="version-row">
-        <span>需要</span>
-        <strong>{required || '--'}</strong>
-      </div>
-      <div className="version-row">
-        <span>已安装</span>
-        <strong>{installed || '--'}</strong>
+      <div className={styles.versionLines}>
+        <div className={styles.versionLine}>
+          <span>需要</span>
+          <strong>{required || '--'}</strong>
+        </div>
+        <div className={styles.versionLine}>
+          <span>已安装</span>
+          <strong>{installed || '--'}</strong>
+        </div>
       </div>
     </div>
   )
@@ -79,12 +82,6 @@ function sessionKeyMatches(expected, actual) {
   if (actualKey.endsWith(`:${expectedKey}`)) return true
 
   return false
-}
-
-function updateTone(status) {
-  if (status === 'downloaded' || status === 'ready') return 'ok'
-  if (status === 'error' || status === 'disabled' || status === 'unsupported') return 'warn'
-  return 'neutral'
 }
 
 class GatewaySocketClient {
@@ -303,7 +300,7 @@ class GatewaySocketClient {
 function LobsterLogo({ className }) {
   return (
     <div className={className} aria-hidden="true">
-      <svg viewBox="0 0 64 64" className="lobster-svg">
+      <svg viewBox="0 0 64 64" className={styles.lobsterSvg}>
         <g fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
           <path d="M24 18c-6-6-13-3-14 3 5 1 10-1 13-6 1 5-1 10-6 13" />
           <path d="M40 18c6-6 13-3 14 3-5 1-10-1-13-6-1 5 1 10 6 13" />
@@ -325,6 +322,19 @@ function LobsterLogo({ className }) {
   )
 }
 
+function TitleBar({ title, version, maximized, onMinimize, onToggleMaximize, onClose, children }) {
+  return (
+    <header className={styles.windowTitlebar}>
+      <div />
+      <div className={styles.windowTitle}>
+        <span>{title}</span>
+        {version ? <span className={styles.windowTitleVersion}>v{version}</span> : null}
+      </div>
+      <div className={cx(styles.windowTitlebarTools, styles.noDrag)}>{children}</div>
+    </header>
+  )
+}
+
 function App() {
   const api = resolveApi()
   const [status, setStatus] = useState(null)
@@ -341,18 +351,6 @@ function App() {
   const [draft, setDraft] = useState('')
   const [sessionKey, setSessionKey] = useState('')
   const [showLogs, setShowLogs] = useState(false)
-  const [appUpdate, setAppUpdate] = useState({
-    supported: true,
-    enabled: false,
-    status: 'idle',
-    message: '更新模块未初始化',
-    currentVersion: '',
-    availableVersion: '',
-    downloadedVersion: '',
-    percent: 0,
-    channel: 'latest',
-    feedUrl: ''
-  })
   const [chatDebugLogs, setChatDebugLogs] = useState([])
   const [gatewayLogTail, setGatewayLogTail] = useState('')
   const gatewayClientRef = useRef(null)
@@ -360,6 +358,7 @@ function App() {
   const activeSessionKeyRef = useRef('')
   const chatMessagesRef = useRef(null)
   const [checkedOnce, setCheckedOnce] = useState(false)
+  const [windowState, setWindowState] = useState({ maximized: false, minimized: false })
 
   function scrollMessagesToBottom() {
     const container = chatMessagesRef.current
@@ -412,6 +411,17 @@ function App() {
   }
 
   useEffect(() => {
+    if (!api?.getWindowState) return undefined
+    api.getWindowState().then((state) => {
+      setWindowState({
+        maximized: Boolean(state?.maximized),
+        minimized: Boolean(state?.minimized)
+      })
+    }).catch(() => {})
+    return undefined
+  }, [api])
+
+  useEffect(() => {
     if (!api?.onInstallProgress) return undefined
     const off = api.onInstallProgress((payload) => {
       setProgress({
@@ -428,32 +438,6 @@ function App() {
   useEffect(() => {
     if (!api?.getLauncherStatus) return
     checkEnvironment({ silent: true }).catch(() => {})
-  }, [api])
-
-  useEffect(() => {
-    if (!api?.getAppUpdateState) return undefined
-
-    let active = true
-    api.getAppUpdateState()
-      .then((state) => {
-        if (active && state) {
-          setAppUpdate((prev) => ({ ...prev, ...state }))
-        }
-      })
-      .catch(() => {})
-
-    const off = typeof api.onAppUpdateState === 'function'
-      ? api.onAppUpdateState((state) => {
-          if (state) {
-            setAppUpdate((prev) => ({ ...prev, ...state }))
-          }
-        })
-      : undefined
-
-    return () => {
-      active = false
-      off?.()
-    }
   }, [api])
 
   useEffect(() => {
@@ -505,7 +489,10 @@ function App() {
 
         if (payloadSessionKey && payloadSessionKey !== activeSessionKey) {
           activeSessionKeyRef.current = payloadSessionKey
-          setSessionKey(payloadSessionKey)
+          setChatDebugLogs((prev) => [
+            ...prev.slice(-119),
+            `[${new Date().toLocaleTimeString()}] adopt event session=${payloadSessionKey}`
+          ])
         }
 
         if (payload.state === 'error') {
@@ -644,26 +631,6 @@ function App() {
     }
   }
 
-  async function handleCheckAppUpdate() {
-    if (typeof api?.checkAppUpdate !== 'function') return
-
-    try {
-      await api.checkAppUpdate()
-    } catch (error) {
-      setLogs((prev) => [...prev, `更新检查失败：${error?.message || String(error)}`])
-    }
-  }
-
-  async function handleInstallUpdate() {
-    if (typeof api?.quitAndInstallUpdate !== 'function') return
-
-    try {
-      await api.quitAndInstallUpdate()
-    } catch (error) {
-      setLogs((prev) => [...prev, `更新安装失败：${error?.message || String(error)}`])
-    }
-  }
-
   async function handleSendMessage() {
     const text = draft.trim()
     if (!text || !gatewayClientRef.current || chatState !== 'connected') return
@@ -682,7 +649,7 @@ function App() {
         sessionKey,
         message: text,
         idempotencyKey: `desktop-${Date.now()}`,
-        deliver: false
+        deliver: true
       }, { expectFinal: true })
 
       if (response?.runId) {
@@ -704,30 +671,44 @@ function App() {
     : ready
       ? '开始使用'
       : '一键安装环境'
-  const updateStatusBusy = appUpdate.status === 'checking' || appUpdate.status === 'downloading'
+  const handleMinimizeWindow = () => api?.minimizeWindow?.()
+  const handleToggleMaximizeWindow = async () => {
+    if (!api?.toggleMaximizeWindow) return
+    const result = await api.toggleMaximizeWindow()
+    setWindowState((prev) => ({ ...prev, maximized: Boolean(result?.maximized) }))
+  }
+  const handleCloseWindow = () => api?.closeWindow?.()
+  const titleBarTitle = mode === 'chat' ? (chatTitle || 'OpenClaw') : 'OpenClaw'
+  const titleBarVersion = '0.1.3'
+  const titleBarActions = mode === 'chat'
+    ? (
+        <button type="button" className="ghost-btn chat-log-trigger" onClick={() => setShowLogs(true)}>
+          查看日志
+        </button>
+      )
+    : null
 
   if (mode === 'chat' && chatUrl) {
     return (
       <div className="app-shell app-shell-chat app-shell-chat-plain">
         <main className="chat-layout">
-          <section className="chat-panel">
-            <div className="chat-panel-status">
-              <div className="chat-status-main">
-                <span className={chatState === 'connected' ? 'dot' : 'dot loading'} />
-                <span>{chatState === 'connected' ? '已连接' : '连接中…'}</span>
-                {chatError ? <span className="chat-status-error">{chatError}</span> : null}
-              </div>
-              <button type="button" className="ghost-btn chat-log-trigger" onClick={() => setShowLogs(true)}>
-                查看日志
-              </button>
+          <div className="chat-layout-status">
+            <div className="chat-status-main">
+              <span className={chatState === 'connected' ? 'dot' : 'dot loading'} />
+              <span>{chatState === 'connected' ? '已连接' : '连接中…'}</span>
+              {chatError && <span className="chat-status-error">{chatError}</span>}
+              {/* 查看日志 */}
+              {titleBarActions}
             </div>
+          </div>
+          <section className="chat-panel">
             <div className="chat-content">
               <div ref={chatMessagesRef} className="chat-messages">
                 {messages.length === 0 ? (
                   <div className="empty-state">还没有消息，先发一句试试。</div>
                 ) : messages.map((message) => (
                   <div key={message.id} className={`chat-bubble ${message.role}`}>
-                    <div className="chat-role">{message.role === 'assistant' ? 'OpenClaw' : '我'}</div>
+                    {/* <div className="chat-role">{message.role === 'assistant' ? 'OpenClaw' : ''}</div> */}
                     <div className="chat-text">{message.text}</div>
                     {message.error ? <div className="chat-error">{message.error}</div> : null}
                   </div>
@@ -741,12 +722,12 @@ function App() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
-                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                  if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
                     handleSendMessage().catch(() => {})
                   }
                 }}
-                placeholder="输入消息，Cmd/Ctrl + Enter 发送"
+                placeholder="输入消息，回车发送，Shift + Enter 换行"
               />
               <button
                 type="button"
@@ -773,7 +754,6 @@ function App() {
                     </button>
                   </div>
                 </div>
-
                 <div className="chat-log-modal-status">
                   <span className={chatState === 'connected' ? 'dot' : 'dot loading'} />
                   <span>{chatState === 'connected' ? '已连接' : '连接中…'}</span>
@@ -793,154 +773,124 @@ function App() {
               </section>
             </div>
           ) : null}
+
         </main>
       </div>
     )
   }
 
   return (
-    <div className="launcher-shell">
-      <div className="launcher-card">
-        <div className="launcher-ambient launcher-ambient-a" aria-hidden="true" />
-        <div className="launcher-ambient launcher-ambient-b" aria-hidden="true" />
-        <div className="launcher-top-tools">
-          <span className="hero-version">v{appUpdate.currentVersion || '0.1.0'}</span>
-          <button
-            type="button"
-            className="ghost-btn hero-tool-btn"
-            onClick={handleCheckAppUpdate}
-            disabled={!api?.checkAppUpdate || updateStatusBusy}
-          >
-            {appUpdate.status === 'checking' ? '检查中…' : '检查更新'}
-          </button>
-          {appUpdate.status === 'downloaded' ? (
-            <button type="button" className="primary-btn hero-install-btn" onClick={handleInstallUpdate}>
-              重启安装
-            </button>
-          ) : null}
+    <div className={styles.launcherShell}>
+      <div className={styles.launcherCard}>
+        <TitleBar
+          title={titleBarTitle}
+          version={titleBarVersion}
+          maximized={windowState.maximized}
+          onMinimize={handleMinimizeWindow}
+          onToggleMaximize={handleToggleMaximizeWindow}
+          onClose={handleCloseWindow}
+        >
+          {titleBarActions}
+        </TitleBar>
+        <header className={styles.launcherAppbar}>
+          <div className={styles.launcherBrand}>
+            <LobsterLogo className={styles.heroMark} />
+            <div className={styles.heroCopy}>
+              <h1>OpenClaw</h1>
+            </div>
+          </div>
+        </header>
+        <div className={styles.stack}>
+          <section className={styles.panel}>
+            <div className={styles.panelHead}>
+              <div>
+                <h2>环境</h2>
+                <p>启动时自动检查最低版本要求。</p>
+              </div>
+            </div>
+
+            {!api ? (
+              <div className="notice notice-warn">
+                没有拿到 Electron preload 接口。
+                不要直接在浏览器打开 `http://127.0.0.1:5173`，请关闭所有 Electron 窗口后重新运行 `npm run dev`。
+              </div>
+            ) : null}
+
+            <div className={styles.versionsGrid}>
+              <VersionCard
+                title="Node"
+                required={`v${status?.requiredNodeVersion || '22.x'}`}
+                installed={status?.nodeVersion ? `v${status.nodeVersion}` : '--'}
+                ok={Boolean(status?.nodeOk)}
+              />
+              <VersionCard
+                title="pnpm"
+                required={status?.requiredPnpmVersion || 'latest'}
+                installed={status?.pnpmVersion || '--'}
+                ok={Boolean(status?.pnpmAvailable)}
+              />
+              <VersionCard
+                title="OpenClaw"
+                required={status?.requiredOpenclawVersion || 'latest'}
+                installed={status?.openclawVersion || '--'}
+                ok={Boolean(status?.openclawAvailable || status?.gatewayRunning)}
+              />
+            </div>
+          </section>
+
+          <section className={cx(styles.panel, styles.entryPanel)}>
+            <div className={styles.panelHead}>
+              <div>
+                <h2>进入会话</h2>
+                <p>{ready ? '环境已通过，确认 token 后直接进入。' : '环境不足时，点击按钮会先自动补齐依赖。'}</p>
+              </div>
+            </div>
+
+            <label className={styles.field}>
+              <span>OpenClaw Token</span>
+              <input
+                type="password"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                placeholder="自动读取或手动填写 OpenClaw token"
+                disabled={busy}
+                autoComplete="off"
+                spellCheck="false"
+              />
+            </label>
+
+            {!busy && !checkedOnce ? (
+              <div className={styles.hintLine}>正在自动检查环境。</div>
+            ) : null}
+
+            {!busy && status && !ready ? (
+              <div className={styles.hintLine}>当前环境未达到最低要求，点击下面按钮会一键安装环境。</div>
+            ) : null}
+
+            {!busy && ready && !tokenReady ? (
+              <div className={styles.hintLine}>环境已通过，还差 token。</div>
+            ) : null}
+
+            {!busy && canEnterChat ? (
+              <div className={cx(styles.hintLine, styles.hintLineSuccess)}>环境和 token 都已就绪，可以直接进入对话。</div>
+            ) : null}
+
+            <div className={styles.panelActions}>
+              <button type="button" className="primary-btn" onClick={handleStartChat} disabled={busy || !api || !checkedOnce}>
+                {busy ? '处理中…' : canEnterChat ? '开始使用' : primaryButtonText}
+              </button>
+            </div>
+
+            {logs.length ? (
+              <details className={styles.logPanel}>
+                <summary>查看运行日志</summary>
+                <div className="log">
+                  <pre className="log-pre">{logs.join('\n')}</pre>
+                </div>
+              </details>
+            ) : null}
+          </section>
         </div>
-        <div className="hero">
-          <LobsterLogo className="hero-mark" />
-          <div className="hero-copy">
-            <div className="hero-kicker">OpenClaw Desktop</div>
-            <h1>OpenClaw</h1>
-            <p>把环境检查、Gateway 和主会话入口收成一个桌面工作台。</p>
-          </div>
-        </div>
-
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>检查环境</h2>
-              <p>{ready ? '环境已通过。填好 token 后直接开始使用。' : '进入页面后会自动检查环境；如果本机版本低于最低要求，点击按钮会一键安装环境。'}</p>
-            </div>
-          </div>
-
-          <div className={`launcher-status-banner ${busy || !checkedOnce ? 'scanning' : ready ? 'ready' : 'warn'}`}>
-            <div className="launcher-status-orb" />
-            <div className="launcher-status-copy">
-              <div className="launcher-status-title">
-                {busy || !checkedOnce ? '系统自检中' : ready ? '环境已就绪' : '环境需要处理'}
-              </div>
-              <div className="launcher-status-text">
-                {busy || !checkedOnce
-                  ? '正在扫描 Node、pnpm、OpenClaw 和本地配置。'
-                  : ready
-                    ? '可以直接进入主会话，后续动作会与官方网页使用同一条会话。'
-                    : '当前有依赖或配置未达标，继续下一步会自动尝试修复。'}
-              </div>
-            </div>
-          </div>
-
-          {!api ? (
-            <div className="notice notice-warn">
-              没有拿到 Electron preload 接口。
-              不要直接在浏览器打开 `http://127.0.0.1:5173`，请关闭所有 Electron 窗口后重新运行 `npm run dev`。
-            </div>
-          ) : null}
-
-          {appUpdate.message && appUpdate.status !== 'dev' && appUpdate.status !== 'idle' ? (
-            <div className={`hint-line ${updateTone(appUpdate.status) === 'ok' ? 'success' : ''}`}>
-              {appUpdate.message}
-              {appUpdate.availableVersion ? ` 最新版本 v${appUpdate.availableVersion}` : ''}
-            </div>
-          ) : null}
-
-          {appUpdate.status === 'downloading' ? (
-            <div className="progress-wrap update-progress">
-              <div className="progress-top">
-                <div className="progress-stage">更新下载中</div>
-                <div className="progress-percent">{appUpdate.percent || 0}%</div>
-              </div>
-              <div className="progress-bar">
-                <div className="progress-bar-fill" style={{ width: `${appUpdate.percent || 0}%` }} />
-              </div>
-            </div>
-          ) : null}
-
-          <div className="versions-grid">
-            <VersionCard
-              title="Node"
-              required={`v${status?.requiredNodeVersion || '22.x'}`}
-              installed={status?.nodeVersion ? `v${status.nodeVersion}` : '--'}
-              ok={Boolean(status?.nodeOk)}
-            />
-            <VersionCard
-              title="pnpm"
-              required={status?.requiredPnpmVersion || 'latest'}
-              installed={status?.pnpmVersion || '--'}
-              ok={Boolean(status?.pnpmAvailable)}
-            />
-            <VersionCard
-              title="OpenClaw"
-              required={status?.requiredOpenclawVersion || 'latest'}
-              installed={status?.openclawVersion || '--'}
-              ok={Boolean(status?.openclawAvailable || status?.gatewayRunning)}
-            />
-          </div>
-
-          <label className="field">
-            <span>OpenClaw Token</span>
-            <input
-              type="password"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              placeholder="自动读取或手动填写 OpenClaw token"
-              disabled={busy}
-              autoComplete="off"
-              spellCheck="false"
-            />
-          </label>
-
-          {logs.length ? (
-            <div className="log">
-              <div className="log-title">运行日志</div>
-              <pre className="log-pre">{logs.join('\n')}</pre>
-            </div>
-          ) : null}
-
-          {!busy && !checkedOnce ? (
-            <div className="hint-line">正在自动检查环境。</div>
-          ) : null}
-
-          {!busy && status && !ready ? (
-            <div className="hint-line">当前环境未达到最低要求，点击下面按钮会一键安装环境。</div>
-          ) : null}
-
-          {!busy && ready && !tokenReady ? (
-            <div className="hint-line">环境已通过，还差 token。</div>
-          ) : null}
-
-          {!busy && canEnterChat ? (
-            <div className="hint-line success">环境和 token 都已就绪，可以直接进入对话。</div>
-          ) : null}
-
-          <div className="panel-actions">
-            <button type="button" className="primary-btn" onClick={handleStartChat} disabled={busy || !api || !checkedOnce}>
-              {busy ? '处理中…' : canEnterChat ? '开始使用' : primaryButtonText}
-            </button>
-          </div>
-        </section>
       </div>
     </div>
   )

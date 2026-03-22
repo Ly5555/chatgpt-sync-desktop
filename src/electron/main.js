@@ -29,266 +29,7 @@ const gatewayUrlBase = `http://127.0.0.1:${OPENCLAW_PORT}/`
 const gatewayWsUrl = `ws://127.0.0.1:${OPENCLAW_PORT}`
 const DEFAULT_SESSION_KEY = 'agent:main:main'
 let mainWindow = null
-let autoUpdaterInstance = null
-let updaterEventsBound = false
-let updateConfig = null
-let updateState = {
-  supported: true,
-  enabled: false,
-  status: 'idle',
-  message: '更新模块未初始化',
-  currentVersion: app.getVersion(),
-  availableVersion: '',
-  downloadedVersion: '',
-  percent: 0,
-  channel: 'latest',
-  feedUrl: ''
-}
-
-function getAutoUpdater() {
-  if (autoUpdaterInstance !== null) {
-    return autoUpdaterInstance
-  }
-
-  try {
-    ({ autoUpdater: autoUpdaterInstance } = require('electron-updater'))
-  } catch {
-    autoUpdaterInstance = null
-  }
-
-  return autoUpdaterInstance
-}
-
-function emitUpdateState(targetWindow) {
-  const windows = targetWindow ? [targetWindow] : BrowserWindow.getAllWindows()
-  for (const win of windows) {
-    if (!win || win.isDestroyed()) continue
-    win.webContents.send('app-update:state', updateState)
-  }
-}
-
-function setUpdateState(patch) {
-  updateState = {
-    ...updateState,
-    ...patch,
-    currentVersion: app.getVersion()
-  }
-  emitUpdateState()
-}
-
-function normalizeUpdateUrl(raw) {
-  const value = String(raw || '').trim()
-  if (!value) return ''
-  return value.replace(/\/+$/, '')
-}
-
-async function readJsonFileIfExists(filePath) {
-  try {
-    const raw = await require('fs/promises').readFile(filePath, 'utf8')
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
-
-async function readUpdateConfig() {
-  const envUrl = normalizeUpdateUrl(
-    process.env.OPENCLAW_DESKTOP_UPDATE_URL
-    || process.env.APP_UPDATE_URL
-    || process.env.AUTO_UPDATE_URL
-  )
-  const envChannel = String(process.env.OPENCLAW_DESKTOP_UPDATE_CHANNEL || 'latest').trim() || 'latest'
-
-  if (envUrl) {
-    return {
-      provider: 'generic',
-      url: envUrl,
-      channel: envChannel,
-      source: 'env'
-    }
-  }
-
-  const configPaths = [
-    path.join(app.getPath('userData'), 'app-update.json'),
-    path.join(app.getAppPath(), 'app-update.json')
-  ]
-
-  for (const filePath of configPaths) {
-    const parsed = await readJsonFileIfExists(filePath)
-    const fileUrl = normalizeUpdateUrl(parsed?.url)
-    if (!fileUrl) continue
-    return {
-      provider: parsed?.provider === 'generic' ? 'generic' : 'generic',
-      url: fileUrl,
-      channel: String(parsed?.channel || 'latest').trim() || 'latest',
-      source: filePath
-    }
-  }
-
-  return null
-}
-
-function bindAutoUpdaterEvents(autoUpdater) {
-  if (!autoUpdater || updaterEventsBound) return
-
-  updaterEventsBound = true
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
-
-  autoUpdater.on('checking-for-update', () => {
-    setUpdateState({
-      enabled: true,
-      status: 'checking',
-      message: '正在检查新版本…',
-      percent: 0
-    })
-  })
-
-  autoUpdater.on('update-available', (info) => {
-    setUpdateState({
-      enabled: true,
-      status: 'downloading',
-      message: `发现新版本 v${info?.version || 'unknown'}，开始下载…`,
-      availableVersion: info?.version || '',
-      downloadedVersion: '',
-      percent: 0
-    })
-  })
-
-  autoUpdater.on('update-not-available', () => {
-    setUpdateState({
-      enabled: true,
-      status: 'ready',
-      message: '当前已经是最新版本',
-      availableVersion: '',
-      downloadedVersion: '',
-      percent: 0
-    })
-  })
-
-  autoUpdater.on('download-progress', (progress) => {
-    const nextPercent = Math.max(0, Math.min(100, Math.round(progress?.percent || 0)))
-    setUpdateState({
-      enabled: true,
-      status: 'downloading',
-      message: `正在下载更新… ${nextPercent}%`,
-      percent: nextPercent
-    })
-  })
-
-  autoUpdater.on('update-downloaded', (info) => {
-    setUpdateState({
-      enabled: true,
-      status: 'downloaded',
-      message: `新版本 v${info?.version || 'unknown'} 已下载完成，点击即可重启安装`,
-      availableVersion: info?.version || '',
-      downloadedVersion: info?.version || '',
-      percent: 100
-    })
-  })
-
-  autoUpdater.on('error', (error) => {
-    setUpdateState({
-      enabled: Boolean(updateConfig?.url),
-      status: 'error',
-      message: `更新失败：${error?.message || String(error)}`,
-      percent: 0
-    })
-  })
-}
-
-async function ensureAutoUpdaterConfigured() {
-  const autoUpdater = getAutoUpdater()
-  if (!autoUpdater) {
-    setUpdateState({
-      supported: false,
-      enabled: false,
-      status: 'unsupported',
-      message: '缺少 electron-updater 依赖，请先重新安装依赖'
-    })
-    return null
-  }
-
-  bindAutoUpdaterEvents(autoUpdater)
-
-  if (!app.isPackaged) {
-    setUpdateState({
-      supported: true,
-      enabled: false,
-      status: 'dev',
-      message: '开发模式不检查自动更新'
-    })
-    return null
-  }
-
-  if (!updateConfig) {
-    updateConfig = await readUpdateConfig()
-  }
-
-  if (!updateConfig?.url) {
-    setUpdateState({
-      supported: true,
-      enabled: false,
-      status: 'disabled',
-      message: '未配置更新地址，请先写入 app-update.json 或设置 OPENCLAW_DESKTOP_UPDATE_URL',
-      feedUrl: '',
-      channel: 'latest'
-    })
-    return null
-  }
-
-  if (typeof autoUpdater.setFeedURL === 'function') {
-    autoUpdater.setFeedURL({
-      provider: 'generic',
-      url: updateConfig.url,
-      channel: updateConfig.channel || 'latest'
-    })
-  }
-
-  setUpdateState({
-    supported: true,
-    enabled: true,
-    status: updateState.status === 'downloaded' ? 'downloaded' : 'ready',
-    message: updateState.status === 'downloaded'
-      ? updateState.message
-      : '自动更新已就绪，可手动检查或等待后台检查',
-    feedUrl: updateConfig.url,
-    channel: updateConfig.channel || 'latest'
-  })
-
-  return autoUpdater
-}
-
-async function checkForAppUpdates({ silent = false } = {}) {
-  const autoUpdater = await ensureAutoUpdaterConfigured()
-  if (!autoUpdater) {
-    return { ok: false, state: updateState }
-  }
-
-  try {
-    if (!silent) {
-      setUpdateState({
-        status: 'checking',
-        message: '正在检查新版本…',
-        percent: 0
-      })
-    }
-    const result = await autoUpdater.checkForUpdates()
-    return {
-      ok: true,
-      state: updateState,
-      updateInfo: result?.updateInfo || null
-    }
-  } catch (error) {
-    setUpdateState({
-      enabled: true,
-      status: 'error',
-      message: `检查更新失败：${error?.message || String(error)}`,
-      percent: 0
-    })
-    throw error
-  }
-}
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 function getTokenFile(userDataDir) {
   return path.join(userDataDir, 'openclaw.token')
@@ -635,20 +376,18 @@ async function startChatSession(payload) {
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1360,
-    height: 920,
-    minWidth: 1120,
-    minHeight: 780,
-    maxWidth: 1720,
-    maxHeight: 1280,
-    backgroundColor: '#0f172a',
+    width: 1120,
+    height: 760,
     title: 'OpenClaw Desktop',
     autoHideMenuBar: true,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      // sandbox: true
     }
   })
 
@@ -665,8 +404,16 @@ function createWindow() {
     return { action: 'deny' }
   })
 
-  win.webContents.on('did-finish-load', () => {
-    emitUpdateState(win)
+  win.once('ready-to-show', () => {
+    win.show()
+    if (win.isMinimized()) {
+      win.restore()
+    }
+    win.focus()
+    if (process.platform === 'darwin' && app.dock) {
+      app.dock.show()
+    }
+    app.focus({ steal: true })
   })
 
   win.on('closed', () => {
@@ -679,7 +426,54 @@ function createWindow() {
   return win
 }
 
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow()
+      return
+    }
+
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore()
+    }
+
+    mainWindow.show()
+    mainWindow.focus()
+    if (process.platform === 'darwin' && app.dock) {
+      app.dock.show()
+    }
+    app.focus({ steal: true })
+  })
+}
+
 app.whenReady().then(() => {
+  ipcMain.handle('window:minimize', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+    return { ok: true }
+  })
+  ipcMain.handle('window:maximizeToggle', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return { ok: false, maximized: false }
+    if (win.isMaximized()) {
+      win.unmaximize()
+    } else {
+      win.maximize()
+    }
+    return { ok: true, maximized: win.isMaximized() }
+  })
+  ipcMain.handle('window:close', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
+    return { ok: true }
+  })
+  ipcMain.handle('window:getState', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return {
+      maximized: Boolean(win?.isMaximized()),
+      minimized: Boolean(win?.isMinimized?.())
+    }
+  })
   ipcMain.handle('launcher:getStatus', () => computeLauncherStatus())
   ipcMain.handle('launcher:ensureDeps', (event, payload) => ensureLauncherDeps(event, payload))
   ipcMain.handle('launcher:getGatewayLogTail', async () => {
