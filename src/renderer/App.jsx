@@ -1,338 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import styles from './index.module.css'
+import { sessionKeyMatches } from './lib/chat-utils'
+import { GatewaySocketClient } from './lib/gateway-socket'
+import { TitleBar } from './components/TitleBar'
+import { VersionCard } from './components/VersionCard'
+import { LobsterLogo } from './components/LobsterLogo'
+import { envReady, getPrimaryButtonText, resolveApi } from './lib/launcher'
+import { createOptimisticUserMessage, mapHistoryMessages, markMessageError, mergeAssistantMessage } from './lib/chat-state'
+import { checkLauncherEnvironment, refreshLauncherStatus, startLauncherChat } from './lib/launcher-service'
 
 function cx(...values) {
   return values.filter(Boolean).join(' ')
-}
-
-function resolveApi() {
-  if (typeof window === 'undefined') return null
-
-  const desktopApp = window.desktopApp
-  const legacyApp = window.openclawInstaller
-
-  if (desktopApp?.getLauncherStatus || desktopApp?.startChatSession) {
-    return desktopApp
-  }
-
-  if (desktopApp || legacyApp) {
-    return {
-      openExternal: desktopApp?.openExternal,
-      onInstallProgress: desktopApp?.onInstallProgress || legacyApp?.onInstallProgress,
-      getLauncherStatus: desktopApp?.getLauncherStatus || legacyApp?.getLauncherStatus,
-      ensureDeps: desktopApp?.ensureDeps || legacyApp?.ensureDeps,
-      setToken: desktopApp?.setToken || legacyApp?.setToken,
-      startChatSession: desktopApp?.startChatSession || desktopApp?.startAndOpenChat || legacyApp?.startAndOpenChat
-    }
-  }
-
-  return null
-}
-
-function envReady(status) {
-  if (!status) return false
-  if (status.gatewayRunning) return true
-  return Boolean(status.openclawAvailable || (status.nodeOk && status.pnpmAvailable))
-}
-function VersionCard({ title, required, installed, ok }) {
-  return (
-    <div className={cx(styles.versionCard, ok ? styles.versionCardOk : styles.versionCardWarn)}>
-      <div className={styles.versionTop}>
-        <div className={styles.versionTitle}>{title}</div>
-        <div className={cx(styles.versionState, ok ? styles.versionStateOk : styles.versionStateWarn)}>{ok ? '已达标' : '需处理'}</div>
-      </div>
-      <div className={styles.versionLines}>
-        <div className={styles.versionLine}>
-          <span>需要</span>
-          <strong>{required || '--'}</strong>
-        </div>
-        <div className={styles.versionLine}>
-          <span>已安装</span>
-          <strong>{installed || '--'}</strong>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function extractMessageText(message) {
-  const blocks = Array.isArray(message?.content) ? message.content : []
-  const texts = blocks
-    .filter((block) => block?.type === 'text' && typeof block?.text === 'string')
-    .map((block) => block.text.trim())
-    .filter(Boolean)
-
-  if (texts.length > 0) {
-    return texts.join('\n\n')
-  }
-
-  if (typeof message?.text === 'string' && message.text.trim()) {
-    return message.text.trim()
-  }
-
-  return ''
-}
-
-function sessionKeyMatches(expected, actual) {
-  const expectedKey = String(expected || '').trim()
-  const actualKey = String(actual || '').trim()
-
-  if (!expectedKey || !actualKey) return false
-  if (expectedKey === actualKey) return true
-  if (actualKey.endsWith(`:${expectedKey}`)) return true
-
-  return false
-}
-
-class GatewaySocketClient {
-  constructor({ url, token, sessionKey, onStatus, onHistory, onChatEvent, onDebug }) {
-    this.url = url
-    this.token = token
-    this.sessionKey = sessionKey
-    this.onStatus = onStatus
-    this.onHistory = onHistory
-    this.onChatEvent = onChatEvent
-    this.onDebug = onDebug
-    this.ws = null
-    this.pending = new Map()
-    this.challengeTimer = null
-    this.connectedOnce = false
-  }
-
-  debug(message) {
-    this.onDebug?.(`[${new Date().toLocaleTimeString()}] ${message}`)
-  }
-
-  connect() {
-    this.dispose()
-    this.debug(`connect ws ${this.url}`)
-    this.debug(`session=${this.sessionKey} token=${this.token ? `len:${this.token.length}` : 'missing'}`)
-    this.onStatus?.('connecting')
-    this.ws = new WebSocket(this.url)
-    this.challengeTimer = window.setTimeout(() => {
-      this.debug('connect challenge timeout')
-      this.onStatus?.('error', '等待 Gateway challenge 超时')
-      this.ws?.close()
-    }, 4000)
-
-    this.ws.addEventListener('open', () => {
-      this.debug('ws open')
-      this.onStatus?.('connecting')
-    })
-
-    this.ws.addEventListener('message', (event) => {
-      this.debug(`ws message ${String(event.data).slice(0, 160)}`)
-      this.handleMessage(event.data)
-    })
-
-    this.ws.addEventListener('close', () => {
-      this.debug('ws close')
-      this.clearPending(new Error('Gateway 连接已关闭'))
-      this.onStatus?.(this.connectedOnce ? 'closed' : 'error', this.connectedOnce ? '' : '握手未完成，连接已关闭')
-    })
-
-    this.ws.addEventListener('error', () => {
-      this.debug('ws error')
-      this.onStatus?.('error', 'Gateway WebSocket 连接失败')
-    })
-  }
-
-  dispose() {
-    if (this.challengeTimer) {
-      window.clearTimeout(this.challengeTimer)
-      this.challengeTimer = null
-    }
-    if (this.ws) {
-      this.ws.close()
-      this.ws = null
-    }
-    this.clearPending(new Error('Gateway client disposed'))
-  }
-
-  clearPending(error) {
-    for (const pending of this.pending.values()) {
-      if (pending.timer) {
-        window.clearTimeout(pending.timer)
-      }
-      pending.reject(error)
-    }
-    this.pending.clear()
-  }
-
-  handleMessage(raw) {
-    let parsed
-    try {
-      parsed = JSON.parse(raw)
-    } catch (error) {
-      this.debug(`json parse failed: ${error?.message || String(error)}`)
-      return
-    }
-
-    if (parsed?.type === 'event') {
-      if (parsed.event === 'connect.challenge') {
-        const nonce = parsed?.payload?.nonce
-        this.debug(`received challenge nonce=${nonce ? 'yes' : 'no'}`)
-        if (this.challengeTimer) {
-          window.clearTimeout(this.challengeTimer)
-          this.challengeTimer = null
-        }
-        this.sendConnect(nonce)
-        return
-      }
-
-      if (parsed.event === 'chat') {
-        this.debug(`chat event state=${parsed?.payload?.state || 'unknown'}`)
-        this.onChatEvent?.(parsed.payload)
-      }
-
-      if (parsed.event !== 'connect.challenge' && parsed.event !== 'chat') {
-        this.debug(`event ${parsed.event || 'unknown'}`)
-      }
-
-      return
-    }
-
-    if (parsed?.type !== 'res') return
-
-    const pending = this.pending.get(parsed.id)
-    if (!pending) {
-      this.debug(`response without pending id=${parsed.id || 'unknown'}`)
-      return
-    }
-
-    const status = parsed?.payload?.status
-    if (pending.expectFinal && status === 'accepted') {
-      this.debug(`request accepted id=${parsed.id}`)
-      return
-    }
-
-    this.pending.delete(parsed.id)
-    if (pending.timer) {
-      window.clearTimeout(pending.timer)
-    }
-    if (parsed.ok) {
-      this.debug(`request ok id=${parsed.id}`)
-      pending.resolve(parsed.payload)
-    } else {
-      this.debug(`request error id=${parsed.id} message=${parsed?.error?.message || 'unknown'}`)
-      pending.reject(new Error(parsed?.error?.message || 'Gateway request failed'))
-    }
-  }
-
-  async sendConnect(nonce) {
-    if (!nonce) {
-      this.debug('sendConnect aborted: missing nonce')
-      this.onStatus?.('error', 'Gateway challenge 缺少 nonce')
-      return
-    }
-
-    try {
-      this.debug('creating device auth')
-      const device = await window.desktopApp?.createGatewayDeviceAuth?.({
-        nonce,
-        token: this.token,
-        role: 'operator',
-        scopes: ['operator.read', 'operator.write'],
-        clientId: 'gateway-client',
-        clientMode: 'backend',
-        platform: window.desktopApp?.platform || 'macos'
-      })
-
-      this.debug(`connect request with device=${device ? 'yes' : 'no'}`)
-
-      await this.request('connect', {
-        minProtocol: 3,
-        maxProtocol: 3,
-        client: {
-          id: 'gateway-client',
-          displayName: 'OpenClaw Desktop',
-          version: '0.1.0',
-          platform: window.desktopApp?.platform || 'macos',
-          mode: 'backend'
-        },
-        auth: { token: this.token },
-        role: 'operator',
-        scopes: ['operator.read', 'operator.write'],
-        device,
-        locale: navigator.language,
-        userAgent: navigator.userAgent
-      })
-      this.connectedOnce = true
-      this.debug('connect ok, requesting chat.history')
-      this.onStatus?.('connected')
-      const payload = await this.request('chat.history', {
-        sessionKey: this.sessionKey,
-        limit: 100
-      })
-      this.debug(`history loaded count=${Array.isArray(payload?.messages) ? payload.messages.length : 0}`)
-      this.onHistory?.(payload?.messages || [])
-    } catch (error) {
-      this.debug(`connect chain failed: ${error?.message || String(error)}`)
-      this.onStatus?.('error', error?.message || String(error))
-    }
-  }
-
-  request(method, params, { expectFinal = false } = {}) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.debug(`request blocked ${method}: socket not open`)
-      return Promise.reject(new Error('Gateway 尚未连接'))
-    }
-
-    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
-    this.debug(`request ${method} id=${id}`)
-    return new Promise((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        this.pending.delete(id)
-        this.debug(`request timeout ${method} id=${id}`)
-        reject(new Error(`${method} 请求超时`))
-      }, method === 'connect' ? 12000 : 10000)
-      this.pending.set(id, { resolve, reject, expectFinal, timer })
-      this.ws.send(JSON.stringify({
-        type: 'req',
-        id,
-        method,
-        params
-      }))
-    })
-  }
-}
-
-function LobsterLogo({ className }) {
-  return (
-    <div className={className} aria-hidden="true">
-      <svg viewBox="0 0 64 64" className={styles.lobsterSvg}>
-        <g fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M24 18c-6-6-13-3-14 3 5 1 10-1 13-6 1 5-1 10-6 13" />
-          <path d="M40 18c6-6 13-3 14 3-5 1-10-1-13-6-1 5 1 10 6 13" />
-          <path d="M32 19c-5 0-9 4-9 9 0 3 1 5 3 7-4 2-7 6-7 10 0 6 6 11 13 11s13-5 13-11c0-4-3-8-7-10 2-2 3-4 3-7 0-5-4-9-9-9Z" />
-          <path d="M26 38c2 2 4 3 6 3s4-1 6-3" />
-          <path d="M28 12l-3-5" />
-          <path d="M36 12l3-5" />
-          <path d="M20 39l-7 4" />
-          <path d="M21 45l-8 2" />
-          <path d="M44 39l7 4" />
-          <path d="M43 45l8 2" />
-          <path d="M29 56l-3 5" />
-          <path d="M35 56l3 5" />
-          <circle cx="28" cy="27" r="1.5" fill="currentColor" stroke="none" />
-          <circle cx="36" cy="27" r="1.5" fill="currentColor" stroke="none" />
-        </g>
-      </svg>
-    </div>
-  )
-}
-
-function TitleBar({ title, version, maximized, onMinimize, onToggleMaximize, onClose, children }) {
-  return (
-    <header className={styles.windowTitlebar}>
-      <div />
-      <div className={styles.windowTitle}>
-        <span>{title}</span>
-        {version ? <span className={styles.windowTitleVersion}>v{version}</span> : null}
-      </div>
-      <div className={cx(styles.windowTitlebarTools, styles.noDrag)}>{children}</div>
-    </header>
-  )
 }
 
 function App() {
@@ -358,8 +36,6 @@ function App() {
   const activeSessionKeyRef = useRef('')
   const chatMessagesRef = useRef(null)
   const [checkedOnce, setCheckedOnce] = useState(false)
-  const [windowState, setWindowState] = useState({ maximized: false, minimized: false })
-
   function scrollMessagesToBottom() {
     const container = chatMessagesRef.current
     if (!container) return
@@ -377,49 +53,25 @@ function App() {
   }
 
   async function refreshStatus() {
-    const nextStatus = await api?.getLauncherStatus?.()
-    setStatus(nextStatus)
-    setToken((prev) => prev || nextStatus?.tokenValue || '')
-    return nextStatus
+    return refreshLauncherStatus({
+      api,
+      setStatus,
+      setToken
+    })
   }
 
   async function checkEnvironment({ silent = false } = {}) {
-    if (!api) return null
-    setBusy(true)
-    if (!silent) {
-      setLogs([])
-    }
-    setProgress({ percent: 0, stage: '正在检查环境…' })
-    try {
-      const nextStatus = await refreshStatus()
-      setStatus(nextStatus)
-      setCheckedOnce(true)
-      setProgress({ percent: 100, stage: '环境检查完成' })
-      if (!silent) {
-        setLogs((prev) => [...prev, envReady(nextStatus) ? '环境已通过。' : '环境未通过，可继续自动安装。'])
-      }
-      return nextStatus
-    } catch (error) {
-      setProgress({ percent: 0, stage: '失败' })
-      if (!silent) {
-        setLogs((prev) => [...prev, `失败：${error?.message || String(error)}`])
-      }
-      return null
-    } finally {
-      setBusy(false)
-    }
+    return checkLauncherEnvironment({
+      api,
+      silent,
+      setBusy,
+      setLogs,
+      setProgress,
+      setStatus,
+      setToken,
+      setCheckedOnce
+    })
   }
-
-  useEffect(() => {
-    if (!api?.getWindowState) return undefined
-    api.getWindowState().then((state) => {
-      setWindowState({
-        maximized: Boolean(state?.maximized),
-        minimized: Boolean(state?.minimized)
-      })
-    }).catch(() => {})
-    return undefined
-  }, [api])
 
   useEffect(() => {
     if (!api?.onInstallProgress) return undefined
@@ -443,6 +95,7 @@ function App() {
   useEffect(() => {
     if (mode !== 'chat' || !chatUrl || !sessionKey || !token.trim()) return undefined
 
+    // Recreate the gateway client when the chat entry context changes.
     activeSessionKeyRef.current = sessionKey
     setMessages([])
     setChatDebugLogs([
@@ -467,15 +120,7 @@ function App() {
         }
       },
       onHistory: (historyMessages) => {
-        const nextMessages = historyMessages
-          .map((message, index) => ({
-            id: `history-${index}`,
-            role: message?.role === 'assistant' ? 'assistant' : 'user',
-            text: extractMessageText(message),
-            error: ''
-          }))
-          .filter((message) => message.text)
-        setMessages(nextMessages)
+        setMessages(mapHistoryMessages(historyMessages))
       },
       onChatEvent: (payload) => {
         if (!payload) return
@@ -498,57 +143,19 @@ function App() {
         if (payload.state === 'error') {
           const pendingId = draftRunMapRef.current.get(payload.runId)
           if (pendingId) {
-            setMessages((prev) => prev.map((msg) => msg.id === pendingId ? { ...msg, error: payload.errorMessage || '发送失败' } : msg))
+            setMessages((prev) => markMessageError(prev, pendingId, payload.errorMessage || '发送失败'))
             draftRunMapRef.current.delete(payload.runId)
           }
           return
         }
 
         if (payload.state === 'delta') {
-          const assistantText = extractMessageText(payload.message)
-          if (!assistantText) return
-          setMessages((prev) => {
-            const nextId = `assistant-${payload.runId}`
-            const exists = prev.find((message) => message.id === nextId)
-            if (exists) {
-              return prev.map((message) => message.id === nextId ? {
-                ...message,
-                text: assistantText,
-                error: ''
-              } : message)
-            }
-
-            return [...prev, {
-              id: nextId,
-              role: 'assistant',
-              text: assistantText,
-              error: ''
-            }]
-          })
+          setMessages((prev) => mergeAssistantMessage(prev, payload))
           return
         }
 
         if (payload.state === 'final') {
-          const assistantText = extractMessageText(payload.message)
-          if (!assistantText) return
-          setMessages((prev) => {
-            const nextId = `assistant-${payload.runId}`
-            const exists = prev.find((message) => message.id === nextId)
-            if (exists) {
-              return prev.map((message) => message.id === nextId ? {
-                ...message,
-                text: assistantText,
-                error: ''
-              } : message)
-            }
-
-            return [...prev, {
-              id: nextId,
-              role: 'assistant',
-              text: assistantText,
-              error: ''
-            }]
-          })
+          setMessages((prev) => mergeAssistantMessage(prev, payload))
           draftRunMapRef.current.delete(payload.runId)
         }
       }
@@ -574,74 +181,29 @@ function App() {
   }, [mode, messages])
 
   async function handleStartChat() {
-    if (!api) return
-
-    setBusy(true)
-    setLogs([])
-    setProgress({ percent: 0, stage: '准备中…' })
-
-    try {
-      let nextStatus = status || await checkEnvironment()
-
-      if (!envReady(nextStatus)) {
-        setProgress({ percent: 5, stage: '正在安装环境…' })
-        setLogs([])
-        if (typeof api.ensureDeps === 'function') {
-          nextStatus = await api.ensureDeps()
-          setStatus(nextStatus)
-        } else {
-          setLogs((prev) => [...prev, '当前 preload 未暴露 ensureDeps，跳过自动补环境，直接尝试启动。'])
-        }
-        if (!envReady(nextStatus) && typeof api.ensureDeps === 'function') {
-          throw new Error('环境仍未就绪，请查看日志。')
-        }
-      }
-
-      const currentToken = token.trim()
-      if (!currentToken && !nextStatus?.tokenConfigured) {
-        throw new Error('请先填写 OpenClaw gateway token。')
-      }
-
-      if (currentToken) {
-        await api.setToken(currentToken)
-        nextStatus = await refreshStatus()
-      }
-
-      setProgress({ percent: 80, stage: '正在启动对话…' })
-      const startChat = typeof api.startChatSession === 'function'
-        ? api.startChatSession
-        : api.startAndOpenChat
-
-      if (typeof startChat !== 'function') {
-        throw new Error('preload 未注入启动对话接口，请完全退出 Electron 后重新打开。')
-      }
-
-      const result = await startChat({ token: currentToken || undefined })
-      setChatUrl(result.wsUrl)
-      setSessionKey(result.sessionKey)
-      setMode('chat')
-      setProgress({ percent: 100, stage: '对话已就绪' })
-      setLogs((prev) => [...prev, 'OpenClaw WebSocket 对话已连接。'])
-    } catch (error) {
-      const message = error?.message || String(error)
-      setProgress({ percent: 0, stage: '失败' })
-      setLogs((prev) => [...prev, `失败：${message}`])
-    } finally {
-      setBusy(false)
-    }
+    await startLauncherChat({
+      api,
+      status,
+      token,
+      checkEnvironment,
+      refreshStatus,
+      setBusy,
+      setLogs,
+      setProgress,
+      setStatus,
+      setChatUrl,
+      setSessionKey,
+      setMode
+    })
   }
 
   async function handleSendMessage() {
     const text = draft.trim()
     if (!text || !gatewayClientRef.current || chatState !== 'connected') return
 
-    const tempId = `user-${Date.now()}`
-    setMessages((prev) => [...prev, {
-      id: tempId,
-      role: 'user',
-      text,
-      error: ''
-    }])
+    // Show the outbound user message immediately so the UI does not wait on gateway roundtrips.
+    const optimisticMessage = createOptimisticUserMessage(text)
+    setMessages((prev) => [...prev, optimisticMessage])
     setDraft('')
 
     try {
@@ -653,31 +215,17 @@ function App() {
       }, { expectFinal: true })
 
       if (response?.runId) {
-        draftRunMapRef.current.set(response.runId, tempId)
+        draftRunMapRef.current.set(response.runId, optimisticMessage.id)
       }
     } catch (error) {
-      setMessages((prev) => prev.map((msg) => msg.id === tempId ? {
-        ...msg,
-        error: error?.message || String(error)
-      } : msg))
+      setMessages((prev) => markMessageError(prev, optimisticMessage.id, error?.message || String(error)))
     }
   }
 
   const ready = envReady(status)
   const tokenReady = Boolean(token.trim() || status?.tokenConfigured)
   const canEnterChat = ready && tokenReady && !busy
-  const primaryButtonText = !checkedOnce
-    ? '正在检查环境'
-    : ready
-      ? '开始使用'
-      : '一键安装环境'
-  const handleMinimizeWindow = () => api?.minimizeWindow?.()
-  const handleToggleMaximizeWindow = async () => {
-    if (!api?.toggleMaximizeWindow) return
-    const result = await api.toggleMaximizeWindow()
-    setWindowState((prev) => ({ ...prev, maximized: Boolean(result?.maximized) }))
-  }
-  const handleCloseWindow = () => api?.closeWindow?.()
+  const primaryButtonText = getPrimaryButtonText({ checkedOnce, ready, busy, canEnterChat })
   const titleBarTitle = mode === 'chat' ? (chatTitle || 'OpenClaw') : 'OpenClaw'
   const titleBarVersion = '0.1.3'
   const titleBarActions = mode === 'chat'
@@ -785,10 +333,6 @@ function App() {
         <TitleBar
           title={titleBarTitle}
           version={titleBarVersion}
-          maximized={windowState.maximized}
-          onMinimize={handleMinimizeWindow}
-          onToggleMaximize={handleToggleMaximizeWindow}
-          onClose={handleCloseWindow}
         >
           {titleBarActions}
         </TitleBar>
@@ -877,7 +421,7 @@ function App() {
 
             <div className={styles.panelActions}>
               <button type="button" className="primary-btn" onClick={handleStartChat} disabled={busy || !api || !checkedOnce}>
-                {busy ? '处理中…' : canEnterChat ? '开始使用' : primaryButtonText}
+                {primaryButtonText}
               </button>
             </div>
 
