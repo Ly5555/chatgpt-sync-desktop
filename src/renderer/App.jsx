@@ -3,7 +3,6 @@ import styles from './index.module.css'
 import { sessionKeyMatches } from './lib/chat-utils'
 import { GatewaySocketClient } from './lib/gateway-socket'
 import { TitleBar } from './components/TitleBar'
-import { VersionCard } from './components/VersionCard'
 import { LobsterLogo } from './components/LobsterLogo'
 import { envReady, getPrimaryButtonText, resolveApi } from './lib/launcher'
 import { createOptimisticUserMessage, mapHistoryMessages, markMessageError, mergeAssistantMessage } from './lib/chat-state'
@@ -35,7 +34,47 @@ function App() {
   const draftRunMapRef = useRef(new Map())
   const activeSessionKeyRef = useRef('')
   const chatMessagesRef = useRef(null)
+  const autoEnterStartedRef = useRef(false)
   const [checkedOnce, setCheckedOnce] = useState(false)
+  const ready = envReady(status)
+  const tokenReady = Boolean(token.trim() || status?.tokenConfigured)
+  const canEnterChat = ready && tokenReady && !busy
+  const primaryButtonText = getPrimaryButtonText({ checkedOnce, ready, busy, canEnterChat })
+  const titleBarTitle = mode === 'chat' ? (chatTitle || 'OpenClaw') : 'OpenClaw'
+  const titleBarVersion = '0.1.3'
+  const gatewayEndpoint = status?.gatewayWsUrl || 'ws://127.0.0.1:18789'
+  const environmentItems = [
+    {
+      key: 'node',
+      label: 'Node.js 环境',
+      ok: Boolean(status?.nodeOk),
+      required: `>= v${status?.requiredNodeVersion || '22.x'}`,
+      installed: status?.nodeVersion ? `v${status.nodeVersion}` : '--'
+    },
+    {
+      key: 'openclaw',
+      label: 'OpenClaw 版本',
+      ok: Boolean(status?.openclawAvailable || status?.gatewayRunning),
+      required: status?.requiredOpenclawVersion || 'latest',
+      installed: status?.openclawVersion || '--'
+    },
+    {
+      key: 'token',
+      label: 'API 配置',
+      ok: tokenReady,
+      required: '已填写 API Key',
+      installed: tokenReady ? '已配置' : '--'
+    }
+  ]
+  const titleBarActions = mode === 'chat'
+    ? (
+        <button type="button" className="ghost-btn chat-log-trigger" onClick={() => setShowLogs(true)}>
+          查看日志
+        </button>
+      )
+    : null
+  const enteringChat = mode === 'launcher' && busy && ready && tokenReady
+
   function scrollMessagesToBottom() {
     const container = chatMessagesRef.current
     if (!container) return
@@ -91,6 +130,21 @@ function App() {
     if (!api?.getLauncherStatus) return
     checkEnvironment({ silent: true }).catch(() => {})
   }, [api])
+
+  useEffect(() => {
+    if (mode !== 'launcher') return
+
+    if (checkedOnce && ready && tokenReady && !busy) {
+      if (autoEnterStartedRef.current) return
+      autoEnterStartedRef.current = true
+      handleStartChat().catch(() => {
+        autoEnterStartedRef.current = false
+      })
+      return
+    }
+
+    autoEnterStartedRef.current = false
+  }, [mode, checkedOnce, ready, tokenReady, busy])
 
   useEffect(() => {
     if (mode !== 'chat' || !chatUrl || !sessionKey || !token.trim()) return undefined
@@ -222,20 +276,6 @@ function App() {
     }
   }
 
-  const ready = envReady(status)
-  const tokenReady = Boolean(token.trim() || status?.tokenConfigured)
-  const canEnterChat = ready && tokenReady && !busy
-  const primaryButtonText = getPrimaryButtonText({ checkedOnce, ready, busy, canEnterChat })
-  const titleBarTitle = mode === 'chat' ? (chatTitle || 'OpenClaw') : 'OpenClaw'
-  const titleBarVersion = '0.1.3'
-  const titleBarActions = mode === 'chat'
-    ? (
-        <button type="button" className="ghost-btn chat-log-trigger" onClick={() => setShowLogs(true)}>
-          查看日志
-        </button>
-      )
-    : null
-
   if (mode === 'chat' && chatUrl) {
     return (
       <div className="app-shell app-shell-chat app-shell-chat-plain">
@@ -336,67 +376,82 @@ function App() {
         >
           {titleBarActions}
         </TitleBar>
-        <header className={styles.launcherAppbar}>
-          <div className={styles.launcherBrand}>
-            <LobsterLogo className={styles.heroMark} />
-            <div className={styles.heroCopy}>
-              <h1>OpenClaw</h1>
+        {enteringChat ? (
+          <div className={styles.launcherLoadingWrap}>
+            <div className={styles.launcherLoadingCard}>
+              <LobsterLogo className={styles.loadingMark} />
+              <div className={styles.loadingTitle}>正在进入对话</div>
+              <div className={styles.loadingText}>{progress.stage || '正在连接 OpenClaw，请稍候…'}</div>
+              <div className={styles.loadingBar}>
+                <div className={styles.loadingBarInner} />
+              </div>
             </div>
           </div>
-        </header>
-        <div className={styles.stack}>
-          <section className={styles.panel}>
-            <div className={styles.panelHead}>
-              <div>
-                <h2>环境</h2>
-                <p>启动时自动检查最低版本要求。</p>
-              </div>
+        ) : (
+        <div className={styles.launcherContent}>
+          <header className={styles.launcherHero}>
+            <LobsterLogo className={styles.heroMark} />
+            <div className={styles.heroCopyCentered}>
+              <h1>OpenClaw 客户端</h1>
+              <p>{ready ? '环境检查完成，请完成配置' : '正在检查环境，请稍候配置'}</p>
+            </div>
+          </header>
+
+          <section className={styles.setupCard}>
+            <div className={styles.resultHeader}>
+              <div className={styles.resultTitle}>环境检查结果</div>
+              <button
+                type="button"
+                className={styles.inlineRefresh}
+                onClick={() => checkEnvironment().catch(() => {})}
+                disabled={busy || !api}
+              >
+                重新检查
+              </button>
+            </div>
+
+            <div className={styles.resultList}>
+              {environmentItems.map((item) => (
+                <div key={item.key} className={styles.resultItem}>
+                  <span className={cx(styles.resultIcon, item.ok ? styles.resultIconOk : styles.resultIconWarn)}>
+                    {item.ok ? '✓' : '!' }
+                  </span>
+                  <div className={styles.resultContent}>
+                    <div className={styles.resultItemLabel}>{item.label}</div>
+                    <div className={styles.resultMeta}>
+                      <span>最低要求：{item.required}</span>
+                      <span>当前：{item.installed}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
 
             {!api ? (
-              <div className="notice notice-warn">
-                没有拿到 Electron preload 接口。
-                不要直接在浏览器打开 `http://127.0.0.1:5173`，请关闭所有 Electron 窗口后重新运行 `npm run dev`。
+              <div className={styles.inlineError}>
+                没有拿到 Electron preload 接口，请关闭 Electron 后重新运行 `npm run dev`。
               </div>
             ) : null}
-
-            <div className={styles.versionsGrid}>
-              <VersionCard
-                title="Node"
-                required={`v${status?.requiredNodeVersion || '22.x'}`}
-                installed={status?.nodeVersion ? `v${status.nodeVersion}` : '--'}
-                ok={Boolean(status?.nodeOk)}
-              />
-              <VersionCard
-                title="pnpm"
-                required={status?.requiredPnpmVersion || 'latest'}
-                installed={status?.pnpmVersion || '--'}
-                ok={Boolean(status?.pnpmAvailable)}
-              />
-              <VersionCard
-                title="OpenClaw"
-                required={status?.requiredOpenclawVersion || 'latest'}
-                installed={status?.openclawVersion || '--'}
-                ok={Boolean(status?.openclawAvailable || status?.gatewayRunning)}
-              />
-            </div>
           </section>
 
-          <section className={cx(styles.panel, styles.entryPanel)}>
-            <div className={styles.panelHead}>
-              <div>
-                <h2>进入会话</h2>
-                <p>{ready ? '环境已通过，确认 token 后直接进入。' : '环境不足时，点击按钮会先自动补齐依赖。'}</p>
-              </div>
-            </div>
+          <div className={styles.formStack}>
+            <label className={styles.field}>
+              <span>API 端点</span>
+              <input
+                type="text"
+                value={gatewayEndpoint}
+                readOnly
+                disabled
+              />
+            </label>
 
             <label className={styles.field}>
-              <span>OpenClaw Token</span>
+              <span>API Key</span>
               <input
                 type="password"
                 value={token}
                 onChange={(event) => setToken(event.target.value)}
-                placeholder="自动读取或手动填写 OpenClaw token"
+                placeholder="sk-xxxxxxxxxxxxxxxx"
                 disabled={busy}
                 autoComplete="off"
                 spellCheck="false"
@@ -406,17 +461,14 @@ function App() {
             {!busy && !checkedOnce ? (
               <div className={styles.hintLine}>正在自动检查环境。</div>
             ) : null}
-
             {!busy && status && !ready ? (
               <div className={styles.hintLine}>当前环境未达到最低要求，点击下面按钮会一键安装环境。</div>
             ) : null}
-
             {!busy && ready && !tokenReady ? (
-              <div className={styles.hintLine}>环境已通过，还差 token。</div>
+              <div className={styles.hintLine}>环境已通过，还差 API Key。</div>
             ) : null}
-
             {!busy && canEnterChat ? (
-              <div className={cx(styles.hintLine, styles.hintLineSuccess)}>环境和 token 都已就绪，可以直接进入对话。</div>
+              <div className={cx(styles.hintLine, styles.hintLineSuccess)}>环境和 API Key 都已就绪，可以直接进入对话。</div>
             ) : null}
 
             <div className={styles.panelActions}>
@@ -433,8 +485,9 @@ function App() {
                 </div>
               </details>
             ) : null}
-          </section>
+          </div>
         </div>
+        )}
       </div>
     </div>
   )

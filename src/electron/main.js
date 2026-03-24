@@ -489,37 +489,8 @@ app.whenReady().then(() => {
     return writeStoredToken(userDataDir, token).then(() => ({ ok: true }))
   })
   ipcMain.handle('launcher:startChatSession', (_event, payload) => startChatSession(payload))
-  ipcMain.handle('appUpdate:getState', () => updateState)
-  ipcMain.handle('appUpdate:check', async (_event, payload) => checkForAppUpdates(payload || {}))
-  ipcMain.handle('appUpdate:quitAndInstall', async () => {
-    const autoUpdater = await ensureAutoUpdaterConfigured()
-    if (!autoUpdater || updateState.status !== 'downloaded') {
-      throw new Error('更新尚未下载完成。')
-    }
-
-    setImmediate(() => {
-      autoUpdater.quitAndInstall(false, true)
-    })
-
-    return { ok: true }
-  })
 
   createWindow()
-  ensureAutoUpdaterConfigured()
-    .then((autoUpdater) => {
-      if (!autoUpdater) return
-      setTimeout(() => {
-        checkForAppUpdates({ silent: true }).catch(() => {})
-      }, 2500)
-    })
-    .catch((error) => {
-      setUpdateState({
-        supported: true,
-        enabled: false,
-        status: 'error',
-        message: `更新初始化失败：${error?.message || String(error)}`
-      })
-    })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
