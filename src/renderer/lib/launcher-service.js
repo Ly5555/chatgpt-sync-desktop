@@ -62,7 +62,7 @@ export async function startLauncherChat({
   setSessionKey,
   setMode
 }) {
-  if (!api) return
+  if (!api) return { ok: false }
 
   setBusy(true)
   setLogs([])
@@ -110,10 +110,12 @@ export async function startLauncherChat({
     setMode('chat')
     setProgress({ percent: 100, stage: '对话已就绪' })
     setLogs((prev) => [...prev, 'OpenClaw WebSocket 对话已连接。'])
+    return { ok: true }
   } catch (error) {
     const message = error?.message || String(error)
     setProgress({ percent: 0, stage: '失败' })
     setLogs((prev) => [...prev, `失败：${message}`])
+    return { ok: false, message }
   } finally {
     setBusy(false)
   }

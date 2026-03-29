@@ -19,7 +19,7 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState({ percent: 0, stage: '' })
   const [logs, setLogs] = useState([])
-  const [mode, setMode] = useState('launcher')
+  const [mode, setMode] = useState('boot')
   const [chatUrl, setChatUrl] = useState('')
   const [chatTitle, setChatTitle] = useState('OpenClaw')
   const [chatState, setChatState] = useState('idle')
@@ -34,7 +34,6 @@ function App() {
   const draftRunMapRef = useRef(new Map())
   const activeSessionKeyRef = useRef('')
   const chatMessagesRef = useRef(null)
-  const autoEnterStartedRef = useRef(false)
   const [checkedOnce, setCheckedOnce] = useState(false)
   const ready = envReady(status)
   const tokenReady = Boolean(token.trim() || status?.tokenConfigured)
@@ -73,7 +72,7 @@ function App() {
         </button>
       )
     : null
-  const enteringChat = mode === 'launcher' && busy && ready && tokenReady
+  const enteringChat = (mode === 'boot' && busy) || (mode === 'launcher' && busy && ready)
 
   function scrollMessagesToBottom() {
     const container = chatMessagesRef.current
@@ -127,24 +126,47 @@ function App() {
   }, [api])
 
   useEffect(() => {
-    if (!api?.getLauncherStatus) return
-    checkEnvironment({ silent: true }).catch(() => {})
-  }, [api])
+    if (!api?.getLauncherStatus || mode !== 'boot') return
 
-  useEffect(() => {
-    if (mode !== 'launcher') return
+    let cancelled = false
 
-    if (checkedOnce && ready && tokenReady && !busy) {
-      if (autoEnterStartedRef.current) return
-      autoEnterStartedRef.current = true
-      handleStartChat().catch(() => {
-        autoEnterStartedRef.current = false
-      })
-      return
+    const bootstrap = async () => {
+      const nextStatus = await checkEnvironment({ silent: true })
+      if (cancelled) return
+
+      if (envReady(nextStatus)) {
+        const result = await startLauncherChat({
+          api,
+          status: nextStatus,
+          token: token.trim() || nextStatus?.tokenValue || '',
+          checkEnvironment,
+          refreshStatus,
+          setBusy,
+          setLogs,
+          setProgress,
+          setStatus,
+          setChatUrl,
+          setSessionKey,
+          setMode
+        })
+
+        if (cancelled) return
+        if (result?.ok) return
+      }
+
+      setMode('launcher')
     }
 
-    autoEnterStartedRef.current = false
-  }, [mode, checkedOnce, ready, tokenReady, busy])
+    bootstrap().catch(() => {
+      if (!cancelled) {
+        setMode('launcher')
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [api, mode])
 
   useEffect(() => {
     if (mode !== 'chat' || !chatUrl || !sessionKey || !token.trim()) return undefined
@@ -235,7 +257,7 @@ function App() {
   }, [mode, messages])
 
   async function handleStartChat() {
-    await startLauncherChat({
+    return startLauncherChat({
       api,
       status,
       token,
@@ -363,6 +385,46 @@ function App() {
           ) : null}
 
         </main>
+      </div>
+    )
+  }
+
+  if (mode === 'boot') {
+    return (
+      <div className={styles.launcherShell}>
+        <div className={styles.launcherCard}>
+          <TitleBar title={titleBarTitle} version={titleBarVersion} />
+          <div className={styles.launcherLoadingWrap}>
+            <div className={styles.launcherLoadingCard}>
+              <div className={styles.loadingAura} />
+              <div className={styles.loadingBadge}>OPENCLAW DESKTOP</div>
+              <div className={styles.loadingLogoWrap}>
+                <LobsterLogo className={styles.loadingMark} />
+                <div className={styles.loadingPulse} />
+              </div>
+              <div className={styles.loadingTitle}>正在准备 OpenClaw</div>
+              <div className={styles.loadingText}>{progress.stage || '正在检查环境并初始化会话能力，请稍候…'}</div>
+              <div className={styles.loadingSteps}>
+                <div className={styles.loadingStep}>
+                  <span className={styles.loadingStepDot} />
+                  <span>检查本地环境</span>
+                </div>
+                <div className={styles.loadingStep}>
+                  <span className={styles.loadingStepDot} />
+                  <span>验证 Gateway 配置</span>
+                </div>
+                <div className={styles.loadingStep}>
+                  <span className={styles.loadingStepDot} />
+                  <span>进入主会话</span>
+                </div>
+              </div>
+              <div className={styles.loadingBar}>
+                <div className={styles.loadingBarInner} />
+              </div>
+              <div className={styles.loadingFoot}>启动过程通常只需要几秒钟</div>
+            </div>
+          </div>
+        </div>
       </div>
     )
   }
